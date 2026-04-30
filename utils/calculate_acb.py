@@ -5,7 +5,8 @@ ACB (Adjusted Cost Base) Calculator — RSU & ESPP
 Input CSV:
     E*TRADE holdings export parsed by utils/etrade_holdings_csv.py
 Cost basis source:
-    Total USD cost = Est. Cost Basis (per share): × Sellable Qty.
+    RSU total USD cost  = Est. Cost Basis (per share): × Sellable Qty.
+    ESPP total USD cost = Purchase Date FMV × Sellable Qty.
 FX conversion:
     USD → CAD via Bank of Canada VALET API (FXUSDCAD), keyed on Date Acquired.
     If Date Acquired falls on a weekend/holiday, the nearest prior business day

@@ -56,6 +56,7 @@ Inside `acb_db.py`:
 - `view <upto_year>` shows ACB calculations up to and including that year.
 - Output rows carry a `source` field. Current import source is E*TRADE only.
 - FX rates come from the Bank of Canada VALET API.
+- Per-share USD cost comes from `Est. Cost Basis (per share):` for RSU rows and `Purchase Date FMV` for ESPP rows.
 
 ## Beta 0.1 limits
 

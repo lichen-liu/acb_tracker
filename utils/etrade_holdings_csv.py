@@ -76,11 +76,11 @@ def parse_etrade_holdings_csv(input_path: str, upto_year: Optional[int] = None) 
                     continue
 
                 qty = to_dec(row.get("Sellable Qty.", ""), "Sellable Qty.", row_num)
-                cost_shr_usd = to_dec(
-                    row.get("Est. Cost Basis (per share):", ""),
-                    "Est. Cost Basis (per share):",
-                    row_num,
-                )
+                if plan_type == "ESPP":
+                    cost_field = "Purchase Date FMV"
+                else:
+                    cost_field = "Est. Cost Basis (per share):"
+                cost_shr_usd = to_dec(row.get(cost_field, ""), cost_field, row_num)
 
                 lots.append({
                     "row": row_num,
