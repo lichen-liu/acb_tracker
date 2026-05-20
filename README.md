@@ -7,13 +7,13 @@ Beta 0.1 tracker for calculating and staging ACB data from E*TRADE holdings expo
 The main entry script is:
 
 ```bash
-python3 run_acb_tracker.py ...
+python3 run.py ...
 ```
 
 Source code lives under `acb_tracker/`. Secondary tools live under `scripts/`.
 
 ```text
-run_acb_tracker.py        # main interactive entry
+run.py                    # main interactive entry
 acb_tracker/
   cli.py                 # interactive tracker CLI
   backend.py             # stateless event storage + recomputation
@@ -44,8 +44,8 @@ private_in/
 Start the interactive tracker:
 
 ```bash
-python3 run_acb_tracker.py new <user> <stock_symbol_name>
-python3 run_acb_tracker.py load <user> <stock_symbol_name>
+python3 run.py new <user> <stock_symbol_name>
+python3 run.py load <user> <stock_symbol_name>
 ```
 
 Calculate ACB from a CSV:
@@ -69,13 +69,16 @@ The persistent database is now a stateless event store. Each row is a `buy` or
 - `event_type`
 - `date`
 - `num_shares`
-- `price_per_share` plus `currency`, `fx_rate`, and `fx_source`
+- `price_per_share`, `fee_amount`, `currency`, `fx_rate`, and `fx_source`
 - `acb_amount_cad` for buys
 - `reference` for source-side provenance only
 
 The displayed ACB table is recomputed every time by sorting events oldest to
 newest and maintaining cumulative shares, cumulative ACB, and yearly capital
 gains.
+
+Capital gains are not stored in the database. They are always reconstructed
+from the stateless event ledger during recomputation.
 
 Only the stateless event format is supported. Older precomputed lot databases
 must be migrated before they can be loaded.
@@ -85,6 +88,8 @@ must be migrated before they can be loaded.
 Inside the interactive tracker:
 
 - `merge <etrade_csv_path>`
+- `buy`
+- `sell`
 - `view`
 - `view <upto_year>`
 - `save`
@@ -96,12 +101,21 @@ Inside the interactive tracker:
 
 - Merge stages changes in memory first and asks for confirmation before saving on exit.
 - `save` flushes the in-memory database to disk immediately.
+- `buy` prompts for date, number of shares, FMV, and optional metadata such as grant name, plan, and note, then stages a manual buy event for the current session symbol.
+- `sell` prompts for date, sell price, fees, number of shares, and optional metadata such as grant name, plan, and note, then stages a manual sell event for the current session symbol.
 - `view <upto_year>` recomputes ACB state up to and including that year.
 - Output rows carry a `source` field. Current import source is E*TRADE only.
 - FX rates come from the Bank of Canada VALET API.
 - Stored events also carry `fx_source` so the FX provider is preserved in the database.
 - Per-share USD cost comes from `Est. Cost Basis (per share):` for RSU rows and `Purchase Date FMV` for ESPP rows.
 - `reference` is not used in ACB math. It is a compact optional provenance string in `key=value,key=value` form, assembled from import metadata such as `grant_number`, `vest_date`, `release_date`, and `grant_date`.
+- Optional metadata should stay skippable in the CLI and live in `reference` unless it is required for ACB reconstruction.
+- Manual `buy` and `sell` entry in the CLI currently supports USD inputs only. FX is looked up and stored from the event date.
+- Manual `buy` and `sell` do not prompt for a symbol. They always use the symbol from `python3 run.py new/load <user> <stock_symbol_name>`, and the shell prompt displays that active symbol.
+
+## TODO
+
+- Persist an explicit same-day sequence or timestamp field for events. Right now same-day buy/sell ordering falls back to insertion order, which is not strong enough for long-term deterministic reconstruction.
 
 ## Beta 0.1 limits
 

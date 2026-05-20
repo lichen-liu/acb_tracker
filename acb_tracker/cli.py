@@ -13,16 +13,20 @@ import readline
 import shlex
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from .backend import event_identity, load_events, q_money, q_rate, recompute_state, save_events
+from .backend import event_identity, load_events, parse_decimal, q_money, q_rate, recompute_state, save_events
 from .calculate_acb import fetch_boc_rate, print_table
-from .etrade import parse_etrade_holdings_csv
+from .etrade import parse_date, parse_etrade_holdings_csv
 
 
-COMMANDS = ["merge", "view", "save", "exit", "quit", "help"]
+COMMANDS = ["merge", "buy", "sell", "view", "save", "exit", "quit", "help"]
 BOC_FX_SOURCE = "Bank of Canada VALET API FXUSDCAD"
+ANSI_RESET = "\033[0m"
+BUY_COLOR = "\033[32m"
+SELL_COLOR = "\033[31m"
 
 
 def configure_readline() -> None:
@@ -119,13 +123,188 @@ def shorten_source(source: str) -> str:
     return source
 
 
+def color_enabled() -> bool:
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def event_color(row: dict) -> str:
+    if row["event_type"] == "buy":
+        return BUY_COLOR
+    return SELL_COLOR
+
+
+def colorize_row_value(row: dict, value: str) -> str:
+    if not color_enabled():
+        return value
+    return f"{event_color(row)}{value}{ANSI_RESET}"
+
+
 def format_fmv(row: dict) -> str:
     return f"${row['price_per_share']:,.4f} {row['currency']} × {row['fx_rate']:,.4f}"
 
 
+def format_fee(row: dict) -> str:
+    if row["fee_amount"] == 0:
+        return ""
+    return f"${row['fee_amount']:,.2f} {row['currency']}"
+
+
 def format_acb_delta(row: dict) -> str:
-    label = "acq" if row["event_type"] == "buy" else "rel"
-    return f"{label} ${row['acb_delta_total']:,.2f} / ${row['acb_delta_per_share']:,.4f}"
+    if row["event_type"] == "buy":
+        return f"acq ${row['acb_delta_total']:,.2f} / ${row['acb_delta_per_share']:,.4f}"
+    return f"rel ${row['acb_delta_total']:,.2f} / ${row['acb_delta_per_share']:,.4f}"
+
+
+def format_gain_loss(row: dict) -> str:
+    if row["event_type"] == "buy":
+        return ""
+    return f"${row['capital_gain']:,.2f}"
+
+
+def build_reference_from_pairs(pairs: list[tuple[str, str]]) -> str:
+    parts = []
+    for key, value in pairs:
+        if value:
+            parts.append(f"{key}={value}")
+    return ",".join(parts)
+
+
+def prompt_nonempty(prompt: str) -> str:
+    while True:
+        value = input(prompt).strip()
+        if value:
+            return value
+        print("Value cannot be empty.")
+
+
+def prompt_optional(prompt: str) -> str:
+    return input(prompt).strip()
+
+
+def prompt_decimal(prompt: str) -> Decimal:
+    while True:
+        raw = prompt_nonempty(prompt)
+        try:
+            value = parse_decimal(raw)
+        except Exception:
+            print("Enter a valid number.")
+            continue
+        return value
+
+
+def prompt_positive_decimal(prompt: str) -> Decimal:
+    while True:
+        value = prompt_decimal(prompt)
+        if value <= 0:
+            print("Value must be greater than zero.")
+            continue
+        return value
+
+
+def prompt_sell_event(session_symbol: str) -> dict:
+    while True:
+        raw_date = prompt_nonempty("Sell date: ")
+        try:
+            sell_date = parse_date(raw_date, "Sell date", 1)
+            break
+        except ValueError as exc:
+            print(str(exc))
+
+    num_shares = prompt_positive_decimal("Number of shares sold (USD flow only): ")
+    price_per_share = prompt_positive_decimal("Sell price per share (USD only): ")
+    while True:
+        fee_amount = prompt_decimal("Fees (USD only): ")
+        if fee_amount < 0:
+            print("Fees cannot be negative.")
+            continue
+        break
+    plan = prompt_optional("Plan / lot type (optional): ")
+    grant_name = prompt_optional("Grant name (optional): ")
+    note = prompt_optional("Note (optional): ")
+
+    fx_rate, fx_date = fetch_boc_rate(sell_date)
+    time.sleep(0.15)
+    return {
+        "event_type": "sell",
+        "date": sell_date,
+        "num_shares": num_shares,
+        "currency": "USD",
+        "price_per_share": price_per_share,
+        "fee_amount": fee_amount,
+        "fx_rate": fx_rate,
+        "fx_source": BOC_FX_SOURCE,
+        "acb_amount_cad": Decimal("0"),
+        "fx_date": fx_date,
+        "source": "manual_sell",
+        "plan": plan,
+        "symbol": session_symbol,
+        "reference": build_reference_from_pairs([
+            ("grant_name", grant_name),
+            ("note", note),
+        ]),
+    }
+
+
+def prompt_buy_event(session_symbol: str) -> dict:
+    while True:
+        raw_date = prompt_nonempty("Buy date: ")
+        try:
+            buy_date = parse_date(raw_date, "Buy date", 1)
+            break
+        except ValueError as exc:
+            print(str(exc))
+
+    num_shares = prompt_positive_decimal("Number of shares acquired (USD flow only): ")
+    price_per_share = prompt_positive_decimal("FMV per share (USD only): ")
+    grant_name = prompt_optional("Grant name (optional): ")
+    plan = prompt_optional("Plan / lot type (optional): ")
+    note = prompt_optional("Note (optional): ")
+
+    fx_rate, fx_date = fetch_boc_rate(buy_date)
+    time.sleep(0.15)
+    total_cad = q_money(num_shares * price_per_share * fx_rate)
+    return {
+        "event_type": "buy",
+        "date": buy_date,
+        "num_shares": num_shares,
+        "currency": "USD",
+        "price_per_share": price_per_share,
+        "fee_amount": Decimal("0"),
+        "fx_rate": fx_rate,
+        "fx_source": BOC_FX_SOURCE,
+        "acb_amount_cad": total_cad,
+        "fx_date": fx_date,
+        "source": "manual_buy",
+        "plan": plan,
+        "symbol": session_symbol,
+        "reference": build_reference_from_pairs([
+            ("grant_name", grant_name),
+            ("note", note),
+        ]),
+    }
+
+
+def display_event_input_preview(event: dict, title: str) -> None:
+    print(f"\n{title}")
+    print_table([{
+        "Type": event["event_type"],
+        "Symbol": event.get("symbol", ""),
+        "Date": event["date"],
+        "Shares": f"{event['num_shares']:,.4f}",
+        "Price": f"${event['price_per_share']:,.4f} {event['currency']}",
+        "Fee": f"${event['fee_amount']:,.2f} {event['currency']}",
+        "FX": f"{event['fx_rate']:,.4f}",
+        "FX Date": event["fx_date"],
+    }], [
+        ("Type", 4, "l"),
+        ("Symbol", 8, "l"),
+        ("Date", 10, "l"),
+        ("Shares", 12, "r"),
+        ("Price", 18, "l"),
+        ("Fee", 16, "l"),
+        ("FX", 8, "r"),
+        ("FX Date", 10, "l"),
+    ])
 
 
 def build_reference(row: dict) -> str:
@@ -135,11 +314,7 @@ def build_reference(row: dict) -> str:
         ("release_date", row.get("release_date", "")),
         ("grant_date", row.get("grant_date", "")),
     ]
-    parts = []
-    for key, value in reference_fields:
-        if value:
-            parts.append(f"{key}={value}")
-    return ",".join(parts)
+    return build_reference_from_pairs(reference_fields)
 
 
 def display_rows(events: list[dict], title: str, upto_year: Optional[int] = None) -> None:
@@ -163,28 +338,30 @@ def display_rows(events: list[dict], title: str, upto_year: Optional[int] = None
     columns = [
         ("Type", 4, "l"),
         ("Date", 10, "l"),
-        ("Source", 12, "l"),
+        ("Source", 10, "l"),
         ("Plan", 4, "l"),
         ("Shares", 12, "r"),
-        ("FMV", 27, "l"),
-        ("ACB Delta", 24, "l"),
+        ("FMV", 24, "l"),
+        ("Fee", 12, "l"),
+        ("ACB Delta", 29, "l"),
         ("Cum ACB", 14, "r"),
         ("ACB/Shr", 11, "r"),
         ("Cum Shares", 12, "r"),
         ("Gain/Loss", 12, "r"),
     ]
     table_rows = [{
-        "Type": row["event_type"],
+        "Type": colorize_row_value(row, row["event_type"]),
         "Date": row["date"],
         "Source": shorten_source(row.get("source", "")),
         "Plan": row.get("plan", ""),
-        "Shares": f"{row['num_shares']:,.4f}",
-        "FMV": format_fmv(row),
-        "ACB Delta": format_acb_delta(row),
-        "Cum ACB": f"${row['cum_acb_total']:,.2f}",
-        "ACB/Shr": f"${row['cum_acb_per_share']:,.4f}",
-        "Cum Shares": f"{row['cum_shares']:,.4f}",
-        "Gain/Loss": f"${row['capital_gain']:,.2f}" if row["event_type"] == "sell" else "",
+        "Shares": colorize_row_value(row, f"{row['num_shares']:,.4f}"),
+        "FMV": colorize_row_value(row, format_fmv(row)),
+        "Fee": colorize_row_value(row, format_fee(row)),
+        "ACB Delta": colorize_row_value(row, format_acb_delta(row)),
+        "Cum ACB": colorize_row_value(row, f"${row['cum_acb_total']:,.2f}"),
+        "ACB/Shr": colorize_row_value(row, f"${row['cum_acb_per_share']:,.4f}"),
+        "Cum Shares": colorize_row_value(row, f"{row['cum_shares']:,.4f}"),
+        "Gain/Loss": colorize_row_value(row, format_gain_loss(row)),
     } for row in state.display_rows]
     print_table(table_rows, columns)
     display_summary(state)
@@ -201,6 +378,12 @@ def display_summary(state) -> None:
     }, {
         "Metric": "Open ACB/share",
         "Value": f"${q_rate(state.cum_acb / state.cum_shares):,.4f}" if state.cum_shares else "$0.0000",
+    }, {
+        "Metric": "Open ACB (USD)",
+        "Value": f"${state.cum_acb_usd:,.2f}",
+    }, {
+        "Metric": "Open ACB/share USD",
+        "Value": f"${q_rate(state.cum_acb_usd / state.cum_shares):,.4f}" if state.cum_shares else "$0.0000",
     }]
     print_table(summary_rows, [("Metric", 18, "l"), ("Value", 16, "r")])
 
@@ -235,6 +418,7 @@ def calculate_etrade_buy_events(input_path: Path) -> tuple[list[dict], list[str]
                 "num_shares": row["qty"],
                 "currency": "USD",
                 "price_per_share": row["cost_shr_usd"],
+                "fee_amount": Decimal("0"),
                 "fx_rate": fx_rate,
                 "fx_source": BOC_FX_SOURCE,
                 "acb_amount_cad": total_cad,
@@ -285,11 +469,14 @@ def merge_into_working(working_events: list[dict], import_path: Path) -> tuple[l
     return new_events, skipped
 
 
-def print_help() -> None:
+def print_help(session_symbol: str) -> None:
     print(
+        f"\nSession symbol: {session_symbol}\n"
         "\nCommands:\n"
         "  merge <etrade_csv_path>   Load E*TRADE holdings CSV and stage new buy events in memory\n"
         "                           Source: etrade - holding - by status - sellable - download expanded\n"
+        "  buy                       Manually enter a buy event: date, shares, FMV (USD only), optional metadata\n"
+        "  sell                      Manually enter a sell event: date, price, fees, shares (USD only), optional metadata\n"
         "  view [upto_year]          Recompute and display the current database, optionally through year-end\n"
         "  save                      Flush the in-memory database to disk immediately\n"
         "  exit | quit               Leave the CLI and optionally save pending events\n"
@@ -297,15 +484,15 @@ def print_help() -> None:
     )
 
 
-def cli_loop(db_path: Path, committed_events: list[dict]) -> int:
+def cli_loop(db_path: Path, committed_events: list[dict], session_symbol: str) -> int:
     working_events = list(committed_events)
 
     display_rows(working_events, f"Database: {db_path}")
-    print_help()
+    print_help(session_symbol)
 
     while True:
         try:
-            line = input("acb_tracker> ").strip()
+            line = input(f"acb_tracker[{session_symbol}]> ").strip()
         except EOFError:
             line = "exit"
             print()
@@ -335,7 +522,55 @@ def cli_loop(db_path: Path, committed_events: list[dict]) -> int:
             return 0
 
         if command == "help":
-            print_help()
+            print_help(session_symbol)
+            continue
+
+        if command == "buy":
+            if len(parts) != 1:
+                print("Usage: buy")
+                continue
+            try:
+                buy_event = prompt_buy_event(session_symbol)
+                preview_events = working_events + [buy_event]
+                recompute_state(preview_events)
+            except RuntimeError as exc:
+                print(str(exc))
+                continue
+            except ValueError as exc:
+                print(str(exc))
+                continue
+
+            display_event_input_preview(buy_event, "Buy candidate")
+            display_rows(preview_events, "Totals after buy")
+            if confirm("Stage this buy event in the in-memory database?", default=False):
+                working_events.append(buy_event)
+                print("Staged 1 new buy event. Not yet written to disk.")
+            else:
+                print("Buy cancelled.")
+            continue
+
+        if command == "sell":
+            if len(parts) != 1:
+                print("Usage: sell")
+                continue
+            try:
+                sell_event = prompt_sell_event(session_symbol)
+                preview_events = working_events + [sell_event]
+                recompute_state(preview_events)
+            except RuntimeError as exc:
+                print(str(exc))
+                continue
+            except ValueError as exc:
+                print(str(exc))
+                continue
+
+            display_event_input_preview(sell_event, "Sell candidate")
+            display_rows(preview_events, "Totals after sell")
+            if confirm("Stage this sell event in the in-memory database?", default=False):
+                working_events.append(sell_event)
+                print("Staged 1 new sell event. Not yet written to disk.")
+            else:
+                print("Sell cancelled.")
             continue
 
         if command == "save":
@@ -436,13 +671,13 @@ def main() -> int:
     if args.mode == "new":
         if db_path.exists():
             print(f"Database already exists: {db_path}")
-            print(f"Use: python run_acb_tracker.py load {args.user} {args.stock_symbol_name}")
+            print(f"Use: python run.py load {args.user} {args.stock_symbol_name}")
             return 1
-        return cli_loop(db_path, [])
+        return cli_loop(db_path, [], args.stock_symbol_name)
 
     if not db_path.exists():
         print(f"Database does not exist: {db_path}")
-        print(f"Use: python run_acb_tracker.py new {args.user} {args.stock_symbol_name}")
+        print(f"Use: python run.py new {args.user} {args.stock_symbol_name}")
         return 1
 
     try:
@@ -451,7 +686,7 @@ def main() -> int:
         print(f"Failed to load database: {exc}")
         return 1
 
-    return cli_loop(db_path, committed_events)
+    return cli_loop(db_path, committed_events, args.stock_symbol_name)
 
 
 if __name__ == "__main__":

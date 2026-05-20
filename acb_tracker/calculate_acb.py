@@ -9,8 +9,8 @@ Cost basis source:
     ESPP total USD cost = Purchase Date FMV × Sellable Qty.
 FX conversion:
     USD → CAD via Bank of Canada VALET API (FXUSDCAD), keyed on Date Acquired.
-    If Date Acquired falls on a weekend/holiday, the nearest prior business day
-    is used automatically.
+    If Date Acquired falls on a weekend/holiday, the next available published
+    day is used automatically.
 
 Usage:
     python scripts/calculate_acb.py --input trades.csv
@@ -21,6 +21,7 @@ Usage:
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 import sys
 import time
@@ -35,20 +36,22 @@ from .etrade import parse_etrade_holdings_csv
 # ── Bank of Canada VALET API ──────────────────────────────────────────────────
 BOC_VALET = "https://www.bankofcanada.ca/valet/observations/FXUSDCAD/json"
 _fx_cache: dict = {}
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def fetch_boc_rate(date_str: str) -> tuple[Decimal, str]:
     """
     Return (rate, actual_date) for the given YYYY-MM-DD.
-    Walks back up to 7 calendar days to find the nearest published rate.
+    Uses that date when available; otherwise looks forward up to 7 calendar
+    days for the next published rate.
     """
     if date_str in _fx_cache:
         return _fx_cache[date_str]
 
     target = datetime.strptime(date_str, "%Y-%m-%d")
-    start  = (target - timedelta(days=7)).strftime("%Y-%m-%d")
+    end = (target + timedelta(days=7)).strftime("%Y-%m-%d")
 
-    url = f"{BOC_VALET}?start_date={start}&end_date={date_str}"
+    url = f"{BOC_VALET}?start_date={date_str}&end_date={end}"
     try:
         with urlopen(url, timeout=10) as resp:
             data = json.loads(resp.read().decode())
@@ -58,15 +61,15 @@ def fetch_boc_rate(date_str: str) -> tuple[Decimal, str]:
     observations = data.get("observations", [])
     if not observations:
         raise ValueError(
-            f"No FXUSDCAD data from Bank of Canada for {start} → {date_str}. "
-            "Verify the date is not in the future or before 2017."
+            f"No FXUSDCAD data from Bank of Canada for {date_str} → {end}. "
+            "Verify the date is not in the future or earlier than the available FXUSDCAD history."
         )
 
-    latest      = observations[-1]
-    actual_date = latest["d"]
-    rate        = Decimal(str(latest["FXUSDCAD"]["v"]))
-    result      = (rate, actual_date)
-    _fx_cache[date_str]    = result
+    first = observations[0]
+    actual_date = first["d"]
+    rate = Decimal(str(first["FXUSDCAD"]["v"]))
+    result = (rate, actual_date)
+    _fx_cache[date_str] = result
     _fx_cache[actual_date] = result
     return result
 
@@ -79,9 +82,14 @@ def print_table(rows: list[dict], columns: list[tuple[str, int, str]]) -> None:
 
     def fmt(val: str, width: int, align: str) -> str:
         s = str(val)
-        if len(s) > width:
-            s = s[:width - 1] + "…"
-        return s.ljust(width) if align == "l" else s.rjust(width)
+        visible = ANSI_RE.sub("", s)
+        if len(visible) > width:
+            visible = visible[:width - 1] + "…"
+            s = visible
+        padding = max(width - len(ANSI_RE.sub("", s)), 0)
+        if align == "l":
+            return s + (" " * padding)
+        return (" " * padding) + s
 
     print(sep)
     print("| " + " | ".join(fmt(h, w, a) for h, w, a in columns) + " |")
@@ -196,7 +204,7 @@ def print_acb_report(
     fx_table_rows = []
     for acq_date in sorted(unique_fx):
         rate, boc_date = unique_fx[acq_date]
-        note = "(weekend/holiday — prior business day used)" if boc_date != acq_date else "exact date match"
+        note = "(weekend/holiday — next published day used)" if boc_date != acq_date else "exact date match"
         fx_table_rows.append({
             "Date Acquired": acq_date,
             "BoC Rate Date": boc_date,
