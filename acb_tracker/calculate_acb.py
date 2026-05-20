@@ -3,7 +3,7 @@
 ACB (Adjusted Cost Base) Calculator — RSU & ESPP
 ================================================
 Input CSV:
-    E*TRADE holdings export parsed by utils/etrade_holdings_csv.py
+    E*TRADE holdings export parsed by acb_tracker/etrade.py
 Cost basis source:
     RSU total USD cost  = Est. Cost Basis (per share): × Sellable Qty.
     ESPP total USD cost = Purchase Date FMV × Sellable Qty.
@@ -13,9 +13,9 @@ FX conversion:
     is used automatically.
 
 Usage:
-    python calculate_acb.py --input trades.csv
-    python calculate_acb.py --input trades.csv --output acb_results.csv
-    python calculate_acb.py --input trades.csv --upto 2024        # excludes 2025+
+    python scripts/calculate_acb.py --input trades.csv
+    python scripts/calculate_acb.py --input trades.csv --output acb_results.csv
+    python scripts/calculate_acb.py --input trades.csv --upto 2024        # excludes 2025+
 """
 
 import argparse
@@ -30,10 +30,7 @@ from typing import Optional
 from urllib.error import URLError
 from urllib.request import urlopen
 
-try:
-    from .etrade_holdings_csv import parse_etrade_holdings_csv
-except ImportError:
-    from etrade_holdings_csv import parse_etrade_holdings_csv
+from .etrade import parse_etrade_holdings_csv
 
 # ── Bank of Canada VALET API ──────────────────────────────────────────────────
 BOC_VALET = "https://www.bankofcanada.ca/valet/observations/FXUSDCAD/json"
